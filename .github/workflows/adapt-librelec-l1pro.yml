@@ -71,8 +71,16 @@ jobs:
         run: |
           IMG_FILE=base.img
           
-          # 自动计算 Boot 分区起始字节偏移
-          BOOT_START_SECTOR=$(sudo fdisk -l $IMG_FILE | grep -E "^${IMG_FILE}1" | awk '{print $2}')
+          # 用 parted 获取第一个分区（boot分区）的起始扇区，稳定可靠，不依赖文件名
+          BOOT_START_SECTOR=$(sudo parted -s $IMG_FILE unit s print | awk '/^ 1 / {print $2}' | tr -d 's')
+          
+          # 异常判断：获取失败则直接退出并提示
+          if [[ ! "$BOOT_START_SECTOR" =~ ^[0-9]+$ ]]; then
+            echo "错误：无法获取 Boot 分区起始扇区，分区信息如下："
+            sudo parted -s $IMG_FILE unit s print
+            exit 1
+          fi
+          
           BOOT_OFFSET=$((BOOT_START_SECTOR * 512))
           echo "Boot 分区起始扇区: $BOOT_START_SECTOR, 字节偏移: $BOOT_OFFSET"
           
@@ -83,7 +91,7 @@ jobs:
           echo "Boot 分区文件列表:"
           ls -lh /mnt/le_boot/
           
-          # 备份原 DTB，复制新 DTB
+          # 备份原配置，复制新 DTB
           sudo cp /mnt/le_boot/extlinux/extlinux.conf /mnt/le_boot/extlinux/extlinux.conf.bak
           sudo cp $DTB_FILE /mnt/le_boot/
           
