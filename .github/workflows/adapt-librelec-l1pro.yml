@@ -1,0 +1,118 @@
+name: LibreELEC L1Pro 快速适配
+
+on:
+  workflow_dispatch:
+    inputs:
+      le_version:
+        description: 'LibreELEC 官方版本号'
+        required: true
+        default: '12.2.1'
+        type: string
+
+env:
+  IMG_NAME: LibreELEC-RK3328.aarch64
+  DTB_FILE: rk3328-l1pro-1296mhz.dtb
+  # Bootloader 下载地址（ophub 仓库 chainedbox 目录，对应我家云 L1Pro）
+  IDBLOADER_URL: https://raw.githubusercontent.com/ophub/u-boot/main/u-boot/rockchip/chainedbox/idbloader.bin
+  UBOOT_URL: https://raw.githubusercontent.com/ophub/u-boot/main/u-boot/rockchip/chainedbox/uboot.img
+  TRUST_URL: https://raw.githubusercontent.com/ophub/u-boot/main/u-boot/rockchip/chainedbox/trust.bin
+  # 你的 DTB 文件地址
+  DTB_URL: https://raw.githubusercontent.com/friends137/l1t/main/rk3328-l1pro-1296mhz.dtb
+
+jobs:
+  adapt:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 1. 下载官方 ROCK64 镜像并解压
+        run: |
+          VERSION=${{ github.event.inputs.le_version }}
+          DOWNLOAD_URL="https://releases.libreelec.tv/${IMG_NAME}-${VERSION}-rock64.img.gz"
+          
+          echo "正在下载官方镜像: $DOWNLOAD_URL"
+          wget -q --show-progress -O base.img.gz "$DOWNLOAD_URL"
+          
+          echo "正在解压镜像..."
+          gunzip base.img.gz
+          ls -lh base.img
+          echo "镜像解压完成"
+
+      - name: 2. 下载 L1Pro 适配 Bootloader 三件套
+        run: |
+          mkdir -p bootloader
+          wget -q -O bootloader/idbloader.bin "$IDBLOADER_URL"
+          wget -q -O bootloader/uboot.img "$UBOOT_URL"
+          wget -q -O bootloader/trust.bin "$TRUST_URL"
+          
+          echo "Bootloader 下载完成，文件列表:"
+          ls -lh bootloader/
+
+      - name: 3. 下载 L1Pro 设备树 DTB
+        run: |
+          wget -q -O $DTB_FILE "$DTB_URL"
+          echo "DTB 下载完成，大小: $(ls -lh $DTB_FILE | awk '{print $5}')"
+
+      - name: 4. 替换镜像中的 Bootloader（恢复复位键刷机功能）
+        run: |
+          IMG_FILE=base.img
+          
+          echo "正在替换 idbloader (扇区偏移 64)..."
+          sudo dd if=bootloader/idbloader.bin of=$IMG_FILE bs=512 seek=64 conv=notrunc status=progress
+          
+          echo "正在替换 uboot (扇区偏移 16384)..."
+          sudo dd if=bootloader/uboot.img of=$IMG_FILE bs=512 seek=16384 conv=notrunc status=progress
+          
+          echo "正在替换 trust (扇区偏移 24576)..."
+          sudo dd if=bootloader/trust.bin of=$IMG_FILE bs=512 seek=24576 conv=notrunc status=progress
+          
+          sync
+          echo "Bootloader 全部替换完成"
+
+      - name: 5. 挂载 Boot 分区，替换 DTB 并修改启动配置
+        run: |
+          IMG_FILE=base.img
+          
+          # 自动计算 Boot 分区起始字节偏移
+          BOOT_START_SECTOR=$(sudo fdisk -l $IMG_FILE | grep -E "^${IMG_FILE}1" | awk '{print $2}')
+          BOOT_OFFSET=$((BOOT_START_SECTOR * 512))
+          echo "Boot 分区起始扇区: $BOOT_START_SECTOR, 字节偏移: $BOOT_OFFSET"
+          
+          # 创建挂载点并挂载
+          sudo mkdir -p /mnt/le_boot
+          sudo mount -o loop,offset=$BOOT_OFFSET $IMG_FILE /mnt/le_boot
+          
+          echo "Boot 分区文件列表:"
+          ls -lh /mnt/le_boot/
+          
+          # 备份原 DTB，复制新 DTB
+          sudo cp /mnt/le_boot/extlinux/extlinux.conf /mnt/le_boot/extlinux/extlinux.conf.bak
+          sudo cp $DTB_FILE /mnt/le_boot/
+          
+          # 修改启动配置，替换 DTB 文件名
+          sudo sed -i 's/rk3328-rock64.dtb/rk3328-l1pro-1296mhz.dtb/g' /mnt/le_boot/extlinux/extlinux.conf
+          
+          echo "修改后的启动配置:"
+          cat /mnt/le_boot/extlinux/extlinux.conf
+          
+          # 卸载分区，确保数据写入
+          sudo umount /mnt/le_boot
+          sync
+          echo "DTB 替换与启动配置修改完成"
+
+      - name: 6. 重命名并压缩最终镜像
+        run: |
+          VERSION=${{ github.event.inputs.le_version }}
+          OUTPUT_NAME="${IMG_NAME}-${VERSION}-l1pro.img"
+          
+          mv base.img "$OUTPUT_NAME"
+          echo "正在压缩镜像..."
+          gzip "$OUTPUT_NAME"
+          
+          ls -lh "${OUTPUT_NAME}.gz"
+          echo "最终镜像打包完成"
+
+      - name: 7. 上传成品镜像到 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: LibreELEC-L1Pro-${{ github.event.inputs.le_version }}
+          path: "*.img.gz"
+          retention-days: 30
